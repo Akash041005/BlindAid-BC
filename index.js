@@ -22,7 +22,7 @@ app.get("/", (req, res) => {
   res.send("BlindAid backend running ✅");
 });
 
-/* ---------- EMERGENCY START ---------- */
+/* ---------- EMERGENCY START (FROM PI) ---------- */
 app.post("/emergency", async (req, res) => {
   try {
     const { userId } = req.body;
@@ -32,6 +32,7 @@ app.post("/emergency", async (req, res) => {
 
     sessions[userId] = {
       active: true,
+      locationReceived: false,
       startedAt: new Date()
     };
 
@@ -48,16 +49,34 @@ app.post("/emergency", async (req, res) => {
   }
 });
 
-/* ---------- LOCATION (FROM MOBILE) ---------- */
+/* ---------- EMERGENCY STATUS (FOR FRONTEND POLLING) ---------- */
+app.get("/status/:userId", (req, res) => {
+  const { userId } = req.params;
+  const session = sessions[userId];
+
+  res.json({
+    active: session?.active === true,
+    locationReceived: session?.locationReceived === true
+  });
+});
+
+/* ---------- LOCATION (AUTO FROM MOBILE) ---------- */
 app.post("/location", async (req, res) => {
   try {
     const { userId, lat, lng } = req.body;
 
-    if (!sessions[userId]?.active) {
+    const session = sessions[userId];
+    if (!session?.active) {
       return res.status(400).json({ error: "No active emergency" });
     }
 
-    sessions[userId].location = { lat, lng };
+    // ⛔ ignore duplicate location
+    if (session.locationReceived) {
+      return res.json({ ok: true, ignored: true });
+    }
+
+    session.locationReceived = true;
+    session.location = { lat, lng };
 
     await sendLog(
       `📍 LOCATION RECEIVED\n` +
@@ -65,7 +84,6 @@ app.post("/location", async (req, res) => {
       `https://maps.google.com/?q=${lat},${lng}`
     );
 
-    // notify emergency contacts
     await notifyContacts({
       userId,
       lat,
@@ -73,20 +91,20 @@ app.post("/location", async (req, res) => {
       time: new Date().toLocaleString()
     });
 
-    // tell Raspberry Pi to take photo
-    res.json({ takePhoto: true });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ---------- PHOTO (FROM RASPBERRY PI) ---------- */
+/* ---------- PHOTO (FROM PI) ---------- */
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
     const { userId } = req.body;
+    const session = sessions[userId];
 
-    if (!sessions[userId]?.active) {
+    if (!session?.active) {
       return res.status(400).json({ error: "No active emergency" });
     }
 
@@ -98,7 +116,7 @@ app.post("/photo", upload.single("photo"), async (req, res) => {
     );
 
     // close emergency
-    sessions[userId].active = false;
+    session.active = false;
 
     res.json({ ok: true });
   } catch (err) {
