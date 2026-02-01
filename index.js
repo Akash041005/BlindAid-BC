@@ -69,25 +69,18 @@ app.post("/emergency", async (req, res) => {
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ ok: false, error: "No photo uploaded" });
+      console.log("❌ No file received");
+      return res.status(400).json({ error: "No photo" });
     }
 
-    console.log("📸 Photo received from Pi");
+    console.log("📸 Photo received:", req.file.path);
 
-    const photoPath = path.resolve(req.file.path);
+    await sendPhoto(req.file.path); // telegram function
 
-    await sendTelegramPhoto(
-      photoPath,
-      "📸 Emergency Photo\n⏰ " + new Date().toLocaleString()
-    );
-
-    // delete local file after sending
-    fs.unlinkSync(photoPath);
-
-    res.json({ ok: true });
+    res.json({ success: true });
   } catch (err) {
-    console.error("❌ Photo error:", err.message);
-    res.status(500).json({ ok: false });
+    console.log("❌ Photo error:", err);
+    res.status(500).json({ error: "Photo failed" });
   }
 });
 
