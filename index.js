@@ -1,11 +1,12 @@
 /**
  * index.js
  * --------
- * BlindAid Backend (Final + Talk Images Added)
+ * BlindAid Backend (FINAL CANONICAL VERSION)
  * - Emergency trigger
- * - Photo upload from Pi
+ * - Emergency photo upload
  * - Location upload
  * - Talk mode image receiver (live + last)
+ * - Talk mode AI query (text + 2 images)
  */
 
 import express from "express";
@@ -21,6 +22,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // =====================
+// CONFIG
+// =====================
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_URL =
+  "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
+
+// =====================
 // MIDDLEWARES
 // =====================
 app.use(express.json());
@@ -28,8 +36,8 @@ app.use(express.json());
 // =====================
 // FOLDERS
 // =====================
-const uploadDir = "./uploads";
-const tempDir = "./temp";
+const uploadDir = "./uploads"; // emergency photos
+const tempDir = "./temp";       // talk images
 
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
@@ -87,8 +95,7 @@ app.post("/emergency", async (req, res) => {
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
     if (!req.file) {
-      console.log("❌ No photo received");
-      return res.status(400).json({ error: "No photo" });
+      return res.status(400).json({ ok: false, error: "No photo received" });
     }
 
     console.log("📸 Emergency photo received:", req.file.path);
@@ -113,9 +120,8 @@ app.post("/location", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing lat/lon" });
     }
 
-    console.log("📍 Location received:", lat, lon);
-
     const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
+
     const msg =
       "📍 EMERGENCY LOCATION\n" +
       mapLink + "\n" +
@@ -147,13 +153,97 @@ app.post(
       });
     }
 
-    console.log("🧠 Talk images received:");
-    console.log(" - live.jpg");
-    console.log(" - last.jpg");
-
+    console.log("🧠 Talk images received (live + last)");
     res.json({ ok: true });
   }
 );
+
+// =====================
+// TALK MODE: QUERY (TEXT + 2 IMAGES → AI)
+// =====================
+app.post("/talk/query", async (req, res) => {
+  try {
+    const { text } = req.body;
+
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "No text provided" });
+    }
+
+    const livePath = path.join(tempDir, "live.jpg");
+    const lastPath = path.join(tempDir, "last.jpg");
+
+    if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Images not available"
+      });
+    }
+
+    const liveBase64 = fs.readFileSync(livePath, "base64");
+    const lastBase64 = fs.readFileSync(lastPath, "base64");
+
+    const systemPrompt = `
+You are a calm assistant helping a visually impaired person.
+
+Use the images as context.
+Speak clearly in short sentences.
+Do not ask questions.
+Do not give options.
+
+End with:
+Next step:
+<one clear action>
+`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            { text: systemPrompt },
+            { text: "Previous view:" },
+            {
+              inline_data: {
+                mime_type: "image/jpeg",
+                data: lastBase64
+              }
+            },
+            { text: "Current view:" },
+            {
+              inline_data: {
+                mime_type: "image/jpeg",
+                data: liveBase64
+              }
+            },
+            { text: `User said: ${text}` }
+          ]
+        }
+      ]
+    };
+
+    const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ Gemini error:", data);
+      return res.status(500).json({ ok: false, error: "AI failed" });
+    }
+
+    const reply =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "I am not able to understand the scene clearly.";
+
+    res.json({ ok: true, reply });
+
+  } catch (err) {
+    console.error("❌ Talk query error:", err.message);
+    res.status(500).json({ ok: false });
+  }
+});
 
 // =====================
 // START SERVER
