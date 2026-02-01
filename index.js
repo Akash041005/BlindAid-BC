@@ -16,12 +16,19 @@ import fs from "fs";
 import path from "path";
 import http from "http";
 import { Server } from "socket.io";
-import fetch from "node-fetch";
+
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
+import cors from "cors";
+
+
+
+
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -280,10 +287,11 @@ Next step:
     };
 
     const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload)
+});
+
 
     const data = await response.json();
 
