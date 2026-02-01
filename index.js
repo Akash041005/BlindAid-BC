@@ -12,7 +12,7 @@ import dotenv from "dotenv";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-import fetch from "node-fetch";
+// import fetch from "node-fetch";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 dotenv.config();
