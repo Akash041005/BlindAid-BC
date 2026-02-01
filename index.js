@@ -1,8 +1,10 @@
 /**
- * BlindAid Backend (FINAL CANONICAL VERSION)
- * - Emergency trigger
- * - Emergency photo upload
- * - Location upload (from mobile)
+ * BlindAid Backend (FINAL CANONICAL VERSION – SOCKET ENABLED)
+ * - Emergency trigger (Pi → REST)
+ * - Emergency photo upload (Pi → REST)
+ * - Location upload (Mobile → REST)
+ * - Real-time emergency detection (Socket.IO)
+ * - Frontend sends location after emergency (Socket.IO)
  * - Talk mode image receiver (live + last)
  * - Talk mode AI query (text + 2 images)
  */
@@ -12,12 +14,22 @@ import dotenv from "dotenv";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-// import fetch from "node-fetch";
+import http from "http";
+import { Server } from "socket.io";
+import fetch from "node-fetch";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 // =====================
@@ -67,6 +79,43 @@ const talkStorage = multer.diskStorage({
 const uploadTalkImages = multer({ storage: talkStorage });
 
 // =====================
+// SOCKET.IO – EMERGENCY CHANNEL
+// =====================
+io.on("connection", (socket) => {
+  console.log("📡 App connected:", socket.id);
+
+  // App checks if emergency already active
+  socket.on("emergency:check", () => {
+    socket.emit("emergency:status", {
+      active: emergencyActive
+    });
+  });
+
+  // App sends location AFTER emergency trigger
+  socket.on("emergency:location", async (data) => {
+    try {
+      const { lat, lon } = data;
+      if (!lat || !lon) return;
+
+      const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
+      const msg =
+        "📍 EMERGENCY LOCATION (SOCKET)\n" +
+        mapLink +
+        "\n⏰ Time: " +
+        new Date().toLocaleString();
+
+      await sendTelegramMessage(msg);
+    } catch (err) {
+      console.error("❌ Socket location error:", err.message);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("❌ App disconnected:", socket.id);
+  });
+});
+
+// =====================
 // HEALTH CHECK
 // =====================
 app.get("/health", (_, res) => {
@@ -86,8 +135,14 @@ app.post("/emergency", async (_, res) => {
       "⏰ Time: " + new Date().toLocaleString();
 
     await sendTelegramMessage(msg);
-    res.json({ ok: true });
 
+    // 🔴 REAL-TIME EMIT
+    io.emit("emergency:triggered", {
+      active: true,
+      time: Date.now()
+    });
+
+    res.json({ ok: true });
   } catch (err) {
     console.error("❌ Emergency error:", err.message);
     res.status(500).json({ ok: false });
@@ -95,14 +150,14 @@ app.post("/emergency", async (_, res) => {
 });
 
 // =====================
-// EMERGENCY STATUS (Mobile polling)
+// EMERGENCY STATUS (REST – fallback)
 // =====================
 app.get("/emergency/status", (_, res) => {
   res.json({ active: emergencyActive });
 });
 
 // =====================
-// LOCATION UPLOAD (Mobile)
+// LOCATION UPLOAD (REST – optional)
 // =====================
 app.post("/location", async (req, res) => {
   try {
@@ -119,7 +174,6 @@ app.post("/location", async (req, res) => {
 
     await sendTelegramMessage(msg);
     res.json({ ok: true });
-
   } catch (err) {
     console.error("❌ Location error:", err.message);
     res.status(500).json({ ok: false });
@@ -237,9 +291,8 @@ Next step:
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       "I am not able to understand the scene clearly.";
 
-    talkReady = false; // reset after one interaction
+    talkReady = false;
     res.json({ ok: true, reply });
-
   } catch (err) {
     console.error("❌ Talk query error:", err.message);
     res.status(500).json({ ok: false });
@@ -249,6 +302,6 @@ Next step:
 // =====================
 // START SERVER
 // =====================
-app.listen(PORT, () => {
-  console.log(`🚀 Backend running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`🚀 BlindAid backend + Socket.IO running on port ${PORT}`);
 });
