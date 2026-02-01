@@ -1,10 +1,8 @@
 /**
- * index.js
- * --------
  * BlindAid Backend (FINAL CANONICAL VERSION)
  * - Emergency trigger
  * - Emergency photo upload
- * - Location upload
+ * - Location upload (from mobile)
  * - Talk mode image receiver (live + last)
  * - Talk mode AI query (text + 2 images)
  */
@@ -14,6 +12,7 @@ import dotenv from "dotenv";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
+import fetch from "node-fetch";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 dotenv.config();
@@ -29,6 +28,12 @@ const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
 
 // =====================
+// STATE
+// =====================
+let emergencyActive = false;
+let talkReady = false;
+
+// =====================
 // MIDDLEWARES
 // =====================
 app.use(express.json());
@@ -37,7 +42,7 @@ app.use(express.json());
 // FOLDERS
 // =====================
 const uploadDir = "./uploads"; // emergency photos
-const tempDir = "./temp";       // talk images
+const tempDir = "./temp";      // talk images
 
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
@@ -51,8 +56,8 @@ const upload = multer({ dest: uploadDir });
 // MULTER (TALK IMAGES)
 // =====================
 const talkStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, tempDir),
-  filename: (req, file, cb) => {
+  destination: (_, __, cb) => cb(null, tempDir),
+  filename: (_, file, cb) => {
     if (file.fieldname === "live") cb(null, "live.jpg");
     else if (file.fieldname === "last") cb(null, "last.jpg");
     else cb(null, file.originalname);
@@ -64,16 +69,16 @@ const uploadTalkImages = multer({ storage: talkStorage });
 // =====================
 // HEALTH CHECK
 // =====================
-app.get("/health", (req, res) => {
+app.get("/health", (_, res) => {
   res.json({ ok: true, status: "alive" });
 });
 
 // =====================
-// EMERGENCY TRIGGER
+// EMERGENCY TRIGGER (Pi)
 // =====================
-app.post("/emergency", async (req, res) => {
+app.post("/emergency", async (_, res) => {
   try {
-    console.log("🚨 Emergency triggered");
+    emergencyActive = true;
 
     const msg =
       "🚨 EMERGENCY ALERT 🚨\n" +
@@ -90,38 +95,23 @@ app.post("/emergency", async (req, res) => {
 });
 
 // =====================
-// PHOTO UPLOAD (EMERGENCY)
+// EMERGENCY STATUS (Mobile polling)
 // =====================
-app.post("/photo", upload.single("photo"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ ok: false, error: "No photo received" });
-    }
-
-    console.log("📸 Emergency photo received:", req.file.path);
-
-    await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
-    res.json({ ok: true });
-
-  } catch (err) {
-    console.error("❌ Photo error:", err.message);
-    res.status(500).json({ ok: false });
-  }
+app.get("/emergency/status", (_, res) => {
+  res.json({ active: emergencyActive });
 });
 
 // =====================
-// LOCATION UPLOAD
+// LOCATION UPLOAD (Mobile)
 // =====================
 app.post("/location", async (req, res) => {
   try {
     const { lat, lon } = req.body;
-
     if (!lat || !lon) {
-      return res.status(400).json({ ok: false, error: "Missing lat/lon" });
+      return res.status(400).json({ ok: false });
     }
 
     const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
-
     const msg =
       "📍 EMERGENCY LOCATION\n" +
       mapLink + "\n" +
@@ -137,7 +127,20 @@ app.post("/location", async (req, res) => {
 });
 
 // =====================
-// TALK MODE: IMAGE RECEIVE
+// EMERGENCY PHOTO UPLOAD (Pi)
+// =====================
+app.post("/photo", upload.single("photo"), async (req, res) => {
+  try {
+    await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ Photo error:", err.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+// =====================
+// TALK MODE – IMAGE RECEIVE (Pi)
 // =====================
 app.post(
   "/talk/images",
@@ -147,48 +150,50 @@ app.post(
   ]),
   (req, res) => {
     if (!req.files?.live || !req.files?.last) {
-      return res.status(400).json({
-        ok: false,
-        error: "Both live and last images required"
-      });
+      return res.status(400).json({ ok: false });
     }
 
-    console.log("🧠 Talk images received (live + last)");
+    talkReady = true;
+    console.log("🧠 Talk images ready");
     res.json({ ok: true });
   }
 );
 
 // =====================
-// TALK MODE: QUERY (TEXT + 2 IMAGES → AI)
+// TALK STATUS (Mobile polling)
+// =====================
+app.get("/talk/status", (_, res) => {
+  res.json({ ready: talkReady });
+});
+
+// =====================
+// TALK QUERY (Mobile → Gemini)
 // =====================
 app.post("/talk/query", async (req, res) => {
   try {
     const { text } = req.body;
-
-    if (!text) {
-      return res.status(400).json({ ok: false, error: "No text provided" });
-    }
+    if (!text) return res.status(400).json({ ok: false });
 
     const livePath = path.join(tempDir, "live.jpg");
     const lastPath = path.join(tempDir, "last.jpg");
 
     if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Images not available"
-      });
+      return res.status(400).json({ ok: false });
     }
 
     const liveBase64 = fs.readFileSync(livePath, "base64");
     const lastBase64 = fs.readFileSync(lastPath, "base64");
 
     const systemPrompt = `
-You are a calm assistant helping a visually impaired person.
+You are a calm, practical assistant helping a blind person.
 
-Use the images as context.
-Speak clearly in short sentences.
+Speak like a human guide.
 Do not ask questions.
 Do not give options.
+
+Use 1 to 3 short sentences.
+Say only what is visible and important.
+If there is danger, warn clearly.
 
 End with:
 Next step:
@@ -228,15 +233,11 @@ Next step:
 
     const data = await response.json();
 
-    if (!response.ok) {
-      console.error("❌ Gemini error:", data);
-      return res.status(500).json({ ok: false, error: "AI failed" });
-    }
-
     const reply =
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       "I am not able to understand the scene clearly.";
 
+    talkReady = false; // reset after one interaction
     res.json({ ok: true, reply });
 
   } catch (err) {
