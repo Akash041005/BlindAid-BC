@@ -1,26 +1,62 @@
-import TelegramBot from "node-telegram-bot-api";
+/**
+ * telegram.js
+ * -----------
+ * Telegram group sender
+ * Uses native fetch + FormData (Node 18+/24)
+ */
 
-let bot;
+import dotenv from "dotenv";
+import fs from "fs";
 
-function getBot() {
-  if (!bot) {
-    bot = new TelegramBot(process.env.TG_TOKEN, { polling: false });
-  }
-  return bot;
+dotenv.config();
+
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const GROUP_ID = process.env.TELEGRAM_GROUP_ID;
+
+if (!BOT_TOKEN || !GROUP_ID) {
+  console.error("❌ Telegram ENV missing");
+  process.exit(1);
 }
 
-export async function sendLog(text) {
-  try {
-    await getBot().sendMessage(process.env.TG_CHAT_ID, text);
-  } catch (e) {
-    console.log("⚠️ Telegram log failed (ignored)");
+// =====================
+// SEND TEXT MESSAGE
+// =====================
+export async function sendTelegramMessage(text) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: GROUP_ID,
+      text
+    })
+  });
+
+  if (!res.ok) {
+    throw new Error(await res.text());
   }
 }
 
-export async function sendPhoto(path, caption) {
-  try {
-    await getBot().sendPhoto(process.env.TG_CHAT_ID, path, { caption });
-  } catch (e) {
-    console.log("⚠️ Telegram photo failed (ignored)");
+// =====================
+// SEND PHOTO (LOCAL FILE)
+// =====================
+export async function sendTelegramPhoto(photoPath, caption = "") {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+
+  const buffer = fs.readFileSync(photoPath);
+
+  const form = new FormData();
+  form.append("chat_id", GROUP_ID);
+  form.append("caption", caption);
+  form.append("photo", new Blob([buffer]), "emergency.jpg");
+
+  const res = await fetch(url, {
+    method: "POST",
+    body: form
+  });
+
+  if (!res.ok) {
+    throw new Error(await res.text());
   }
 }

@@ -1,131 +1,128 @@
-import dotenv from "dotenv";
-dotenv.config();
+/**
+ * index.js
+ * --------
+ * BlindAid Backend (Simplified)
+ * - Emergency trigger
+ * - Photo upload from Pi
+ * - Location upload from Mobile
+ * - Telegram group alerts
+ * Node.js v18+ / v24 compatible
+ */
 
 import express from "express";
-import cors from "cors";
+import dotenv from "dotenv";
 import multer from "multer";
-import { sendLog, sendPhoto } from "./telegram.js";
-import { notifyContacts } from "./contacts.js";
+import fs from "fs";
+import path from "path";
+import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
+
+dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
-const upload = multer({ dest: "uploads/" });
 const PORT = process.env.PORT || 3000;
 
-// in-memory emergency sessions
-const sessions = {};
+// =====================
+// MIDDLEWARES
+// =====================
+app.use(express.json());
 
-/* ---------- HEALTH CHECK ---------- */
-app.get("/", (req, res) => {
-  res.send("BlindAid backend running ✅");
+// ensure uploads folder exists
+const uploadDir = "./uploads";
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
+// multer config (for Pi photo)
+const upload = multer({ dest: uploadDir });
+
+// =====================
+// HEALTH CHECK
+// =====================
+app.get("/health", (req, res) => {
+  res.json({ ok: true, status: "alive" });
 });
 
-/* ---------- EMERGENCY START (FROM PI) ---------- */
+// =====================
+// EMERGENCY TRIGGER
+// =====================
 app.post("/emergency", async (req, res) => {
   try {
-    const { userId } = req.body;
-    if (!userId) {
-      return res.status(400).json({ error: "userId required" });
-    }
+    console.log("🚨 Emergency triggered");
 
-    sessions[userId] = {
-      active: true,
-      locationReceived: false,
-      startedAt: new Date()
-    };
+    const msg =
+      "🚨 EMERGENCY ALERT 🚨\n" +
+      "Button pressed on Raspberry Pi.\n" +
+      "⏰ Time: " + new Date().toLocaleString();
 
-    await sendLog(
-      `🚨 EMERGENCY TRIGGERED\n` +
-      `User: ${userId}\n` +
-      `⏰ ${new Date().toLocaleString()}`
-    );
+    await sendTelegramMessage(msg);
 
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
+    console.error("❌ Emergency error:", err.message);
+    res.status(500).json({ ok: false });
   }
 });
 
-/* ---------- EMERGENCY STATUS (FOR FRONTEND POLLING) ---------- */
-app.get("/status/:userId", (req, res) => {
-  const { userId } = req.params;
-  const session = sessions[userId];
-
-  res.json({
-    active: session?.active === true,
-    locationReceived: session?.locationReceived === true
-  });
-});
-
-/* ---------- LOCATION (AUTO FROM MOBILE) ---------- */
-app.post("/location", async (req, res) => {
-  try {
-    const { userId, lat, lng } = req.body;
-
-    const session = sessions[userId];
-    if (!session?.active) {
-      return res.status(400).json({ error: "No active emergency" });
-    }
-
-    // ⛔ ignore duplicate location
-    if (session.locationReceived) {
-      return res.json({ ok: true, ignored: true });
-    }
-
-    session.locationReceived = true;
-    session.location = { lat, lng };
-
-    await sendLog(
-      `📍 LOCATION RECEIVED\n` +
-      `User: ${userId}\n` +
-      `https://maps.google.com/?q=${lat},${lng}`
-    );
-
-    await notifyContacts({
-      userId,
-      lat,
-      lng,
-      time: new Date().toLocaleString()
-    });
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-/* ---------- PHOTO (FROM PI) ---------- */
+// =====================
+// PHOTO UPLOAD (Pi)
+// =====================
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
-    const { userId } = req.body;
-    const session = sessions[userId];
-
-    if (!session?.active) {
-      return res.status(400).json({ error: "No active emergency" });
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "No photo uploaded" });
     }
 
-    await sendPhoto(
-      req.file.path,
-      `📸 PHOTO CAPTURED\n` +
-      `User: ${userId}\n` +
-      `⏰ ${new Date().toLocaleString()}`
+    console.log("📸 Photo received from Pi");
+
+    const photoPath = path.resolve(req.file.path);
+
+    await sendTelegramPhoto(
+      photoPath,
+      "📸 Emergency Photo\n⏰ " + new Date().toLocaleString()
     );
 
-    // close emergency
-    session.active = false;
+    // delete local file after sending
+    fs.unlinkSync(photoPath);
 
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
+    console.error("❌ Photo error:", err.message);
+    res.status(500).json({ ok: false });
   }
 });
 
-/* ---------- START SERVER ---------- */
+// =====================
+// LOCATION UPLOAD (Mobile)
+// =====================
+app.post("/location", async (req, res) => {
+  try {
+    const { lat, lng } = req.body;
+
+    if (!lat || !lng) {
+      return res.status(400).json({ ok: false, error: "Missing lat/lng" });
+    }
+
+    console.log("📍 Location received:", lat, lng);
+
+    const mapLink = `https://maps.google.com/?q=${lat},${lng}`;
+
+    const msg =
+      "📍 EMERGENCY LOCATION\n" +
+      mapLink + "\n" +
+      "⏰ Time: " + new Date().toLocaleString();
+
+    await sendTelegramMessage(msg);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ Location error:", err.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+// =====================
+// START SERVER
+// =====================
 app.listen(PORT, () => {
-  console.log(`🔥 Backend running on port ${PORT}`);
+  console.log(`🚀 Backend running on port ${PORT}`);
 });
