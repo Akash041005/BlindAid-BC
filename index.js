@@ -1,19 +1,17 @@
 /**
  * index.js
  * --------
- * BlindAid Backend (Simplified)
+ * BlindAid Backend (Final Working)
  * - Emergency trigger
  * - Photo upload from Pi
- * - Location upload from Mobile
+ * - Location upload
  * - Telegram group alerts
- * Node.js v18+ / v24 compatible
  */
 
 import express from "express";
 import dotenv from "dotenv";
 import multer from "multer";
 import fs from "fs";
-import path from "path";
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 dotenv.config();
@@ -32,7 +30,7 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
 
-// multer config (for Pi photo)
+// multer config
 const upload = multer({ dest: uploadDir });
 
 // =====================
@@ -69,35 +67,38 @@ app.post("/emergency", async (req, res) => {
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
     if (!req.file) {
-      console.log("❌ No file received");
+      console.log("❌ No photo received");
       return res.status(400).json({ error: "No photo" });
     }
 
     console.log("📸 Photo received:", req.file.path);
 
-    await sendPhoto(req.file.path); // telegram function
+    await sendTelegramPhoto(
+      req.file.path,
+      "📸 Emergency Photo"
+    );
 
-    res.json({ success: true });
+    res.json({ ok: true });
   } catch (err) {
-    console.log("❌ Photo error:", err);
-    res.status(500).json({ error: "Photo failed" });
+    console.error("❌ Photo error:", err.message);
+    res.status(500).json({ ok: false });
   }
 });
 
 // =====================
-// LOCATION UPLOAD (Mobile)
+// LOCATION UPLOAD
 // =====================
 app.post("/location", async (req, res) => {
   try {
-    const { lat, lng } = req.body;
+    const { lat, lon } = req.body;
 
-    if (!lat || !lng) {
-      return res.status(400).json({ ok: false, error: "Missing lat/lng" });
+    if (!lat || !lon) {
+      return res.status(400).json({ ok: false, error: "Missing lat/lon" });
     }
 
-    console.log("📍 Location received:", lat, lng);
+    console.log("📍 Location received:", lat, lon);
 
-    const mapLink = `https://maps.google.com/?q=${lat},${lng}`;
+    const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
 
     const msg =
       "📍 EMERGENCY LOCATION\n" +

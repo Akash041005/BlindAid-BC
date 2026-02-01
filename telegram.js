@@ -2,7 +2,7 @@
  * telegram.js
  * -----------
  * Telegram group sender
- * Uses native fetch + FormData (Node 18+/24)
+ * Node 18+ compatible
  */
 
 import dotenv from "dotenv";
@@ -39,7 +39,7 @@ export async function sendTelegramMessage(text) {
 }
 
 // =====================
-// SEND PHOTO (LOCAL FILE)
+// SEND PHOTO
 // =====================
 export async function sendTelegramPhoto(photoPath, caption = "") {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
