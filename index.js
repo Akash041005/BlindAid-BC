@@ -1,12 +1,11 @@
 /**
- * BlindAid Backend (FINAL CANONICAL VERSION – SOCKET ENABLED)
+ * BlindAid Backend – FINAL FULL index.js
+ * ------------------------------------
  * - Emergency trigger (Pi → REST)
  * - Emergency photo upload (Pi → REST)
- * - Location upload (Mobile → REST)
+ * - Location upload (Mobile → REST + Socket)
  * - Real-time emergency detection (Socket.IO)
- * - Frontend sends location after emergency (Socket.IO)
- * - Talk mode image receiver (live + last)
- * - Talk mode AI query (text + 2 images)
+ * - Talk mode (Pi images → App mic → Gemini → App TTS)
  */
 
 import express from "express";
@@ -15,20 +14,21 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import http from "http";
+import cors from "cors";
+import fetch from "node-fetch";
 import { Server } from "socket.io";
 
 import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
-import cors from "cors";
-
-
-
-
 
 dotenv.config();
 
+// =====================
+// APP + SERVER
+// =====================
 const app = express();
 app.use(cors());
 app.use(express.json());
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -53,27 +53,19 @@ let emergencyActive = false;
 let talkReady = false;
 
 // =====================
-// MIDDLEWARES
-// =====================
-app.use(express.json());
-
-// =====================
 // FOLDERS
 // =====================
-const uploadDir = "./uploads"; // emergency photos
+const uploadDir = "./uploads"; // emergency photo
 const tempDir = "./temp";      // talk images
 
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
 // =====================
-// MULTER (EMERGENCY PHOTO)
+// MULTER
 // =====================
 const upload = multer({ dest: uploadDir });
 
-// =====================
-// MULTER (TALK IMAGES)
-// =====================
 const talkStorage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, tempDir),
   filename: (_, file, cb) => {
@@ -86,27 +78,22 @@ const talkStorage = multer.diskStorage({
 const uploadTalkImages = multer({ storage: talkStorage });
 
 // =====================
-// SOCKET.IO – EMERGENCY CHANNEL
+// SOCKET.IO
 // =====================
 io.on("connection", (socket) => {
   console.log("📡 App connected:", socket.id);
 
-  // App checks if emergency already active
   socket.on("emergency:check", () => {
-    socket.emit("emergency:status", {
-      active: emergencyActive
-    });
+    socket.emit("emergency:status", { active: emergencyActive });
   });
 
-  // App sends location AFTER emergency trigger
-  socket.on("emergency:location", async (data) => {
+  socket.on("emergency:location", async ({ lat, lon }) => {
     try {
-      const { lat, lon } = data;
       if (!lat || !lon) return;
 
       const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
       const msg =
-        "📍 EMERGENCY LOCATION (SOCKET)\n" +
+        "📍 EMERGENCY LOCATION\n" +
         mapLink +
         "\n⏰ Time: " +
         new Date().toLocaleString();
@@ -123,14 +110,14 @@ io.on("connection", (socket) => {
 });
 
 // =====================
-// HEALTH CHECK
+// HEALTH
 // =====================
 app.get("/health", (_, res) => {
-  res.json({ ok: true, status: "alive" });
+  res.json({ ok: true });
 });
 
 // =====================
-// EMERGENCY TRIGGER (Pi)
+// EMERGENCY (PI)
 // =====================
 app.post("/emergency", async (_, res) => {
   try {
@@ -138,12 +125,12 @@ app.post("/emergency", async (_, res) => {
 
     const msg =
       "🚨 EMERGENCY ALERT 🚨\n" +
-      "Button pressed on Raspberry Pi.\n" +
-      "⏰ Time: " + new Date().toLocaleString();
+      "Button pressed on Raspberry Pi\n" +
+      "⏰ Time: " +
+      new Date().toLocaleString();
 
     await sendTelegramMessage(msg);
 
-    // 🔴 REAL-TIME EMIT
     io.emit("emergency:triggered", {
       active: true,
       time: Date.now()
@@ -157,27 +144,26 @@ app.post("/emergency", async (_, res) => {
 });
 
 // =====================
-// EMERGENCY STATUS (REST – fallback)
+// EMERGENCY STATUS
 // =====================
 app.get("/emergency/status", (_, res) => {
   res.json({ active: emergencyActive });
 });
 
 // =====================
-// LOCATION UPLOAD (REST – optional)
+// LOCATION (REST fallback)
 // =====================
 app.post("/location", async (req, res) => {
   try {
     const { lat, lon } = req.body;
-    if (!lat || !lon) {
-      return res.status(400).json({ ok: false });
-    }
+    if (!lat || !lon) return res.status(400).json({ ok: false });
 
     const mapLink = `https://maps.google.com/?q=${lat},${lon}`;
     const msg =
       "📍 EMERGENCY LOCATION\n" +
-      mapLink + "\n" +
-      "⏰ Time: " + new Date().toLocaleString();
+      mapLink +
+      "\n⏰ Time: " +
+      new Date().toLocaleString();
 
     await sendTelegramMessage(msg);
     res.json({ ok: true });
@@ -188,7 +174,7 @@ app.post("/location", async (req, res) => {
 });
 
 // =====================
-// EMERGENCY PHOTO UPLOAD (Pi)
+// EMERGENCY PHOTO
 // =====================
 app.post("/photo", upload.single("photo"), async (req, res) => {
   try {
@@ -201,7 +187,7 @@ app.post("/photo", upload.single("photo"), async (req, res) => {
 });
 
 // =====================
-// TALK MODE – IMAGE RECEIVE (Pi)
+// TALK MODE – IMAGES (PI)
 // =====================
 app.post(
   "/talk/images",
@@ -215,20 +201,26 @@ app.post(
     }
 
     talkReady = true;
-    console.log("🧠 Talk images ready");
+    console.log("🧠 Talk images received");
+
+    io.emit("talk:ready", {
+      ready: true,
+      time: Date.now()
+    });
+
     res.json({ ok: true });
   }
 );
 
 // =====================
-// TALK STATUS (Mobile polling)
+// TALK STATUS (OPTIONAL)
 // =====================
 app.get("/talk/status", (_, res) => {
   res.json({ ready: talkReady });
 });
 
 // =====================
-// TALK QUERY (Mobile → Gemini)
+// TALK QUERY (APP → GEMINI)
 // =====================
 app.post("/talk/query", async (req, res) => {
   try {
@@ -267,19 +259,9 @@ Next step:
           parts: [
             { text: systemPrompt },
             { text: "Previous view:" },
-            {
-              inline_data: {
-                mime_type: "image/jpeg",
-                data: lastBase64
-              }
-            },
+            { inline_data: { mime_type: "image/jpeg", data: lastBase64 } },
             { text: "Current view:" },
-            {
-              inline_data: {
-                mime_type: "image/jpeg",
-                data: liveBase64
-              }
-            },
+            { inline_data: { mime_type: "image/jpeg", data: liveBase64 } },
             { text: `User said: ${text}` }
           ]
         }
@@ -287,11 +269,10 @@ Next step:
     };
 
     const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(payload)
-});
-
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
     const data = await response.json();
 
@@ -300,6 +281,9 @@ Next step:
       "I am not able to understand the scene clearly.";
 
     talkReady = false;
+
+    io.emit("talk:reply", { reply });
+
     res.json({ ok: true, reply });
   } catch (err) {
     console.error("❌ Talk query error:", err.message);
@@ -311,5 +295,5 @@ Next step:
 // START SERVER
 // =====================
 server.listen(PORT, () => {
-  console.log(`🚀 BlindAid backend + Socket.IO running on port ${PORT}`);
+  console.log(`🚀 BlindAid backend running on port ${PORT}`);
 });
