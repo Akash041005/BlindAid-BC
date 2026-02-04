@@ -1,10 +1,9 @@
 /**
- * BlindAid Backend – FINAL ALL-IN-ONE FIXED VERSION
- * ------------------------------------------------
- * ✔ Emergency location → Telegram
- * ✔ GK vs Image logic correct
- * ✔ Images deleted after AI call
- * ✔ No stale image / no missing location
+ * BlindAid Backend – FINAL CLEAN VERSION
+ * ------------------------------------
+ * - Emergency (Pi → REST)
+ * - Talk Mode (Pi images → App voice → Gemini → App TTS)
+ * - Socket.IO based user interaction
  */
 
 import express from "express";
@@ -29,7 +28,10 @@ app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
 
 const PORT = process.env.PORT || 3000;
@@ -44,13 +46,14 @@ const GEMINI_URL =
 // =====================
 // STATE
 // =====================
+let emergencyActive = false;
 let talkImagesReady = false;
 
 // =====================
 // FOLDERS
 // =====================
-const uploadDir = "./uploads";
-const tempDir = "./temp";
+const uploadDir = "./uploads"; // emergency photo
+const tempDir = "./temp";      // talk images
 
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
@@ -68,44 +71,8 @@ const talkStorage = multer.diskStorage({
     else cb(null, file.originalname);
   }
 });
+
 const uploadTalkImages = multer({ storage: talkStorage });
-
-// =====================
-// HELPERS
-// =====================
-function isGeneralKnowledge(text) {
-  const keywords = [
-    "who is",
-    "what is",
-    "president",
-    "prime minister",
-    "capital",
-    "country",
-    "usa",
-    "india",
-    "time",
-    "date",
-    "weather",
-    "how many",
-    "calculate",
-    "history",
-    "population"
-  ];
-  const t = text.toLowerCase();
-  return keywords.some(k => t.includes(k));
-}
-
-function deleteTalkImages() {
-  try {
-    const live = path.join(tempDir, "live.jpg");
-    const last = path.join(tempDir, "last.jpg");
-    if (fs.existsSync(live)) fs.unlinkSync(live);
-    if (fs.existsSync(last)) fs.unlinkSync(last);
-    console.log("🧹 Talk images deleted");
-  } catch (e) {
-    console.error("❌ Image delete error:", e.message);
-  }
-}
 
 // =====================
 // SOCKET.IO
@@ -113,121 +80,81 @@ function deleteTalkImages() {
 io.on("connection", (socket) => {
   console.log("📡 App connected:", socket.id);
 
-  // ---------- EMERGENCY LOCATION (FIXED) ----------
+  // ---------- EMERGENCY ----------
+  socket.on("emergency:check", () => {
+    socket.emit("emergency:status", { active: emergencyActive });
+  });
+
   socket.on("emergency:location", async ({ lat, lon }) => {
     try {
-      if (!lat || !lon) {
-        console.log("❌ Location missing");
-        return;
-      }
+      if (!lat || !lon) return;
 
       const link = `https://maps.google.com/?q=${lat},${lon}`;
-      const msg =
+      await sendTelegramMessage(
         "📍 EMERGENCY LOCATION\n" +
         link +
         "\n⏰ " +
-        new Date().toLocaleString();
-
-      await sendTelegramMessage(msg);
-      console.log("📤 Location sent to Telegram");
-
+        new Date().toLocaleString()
+      );
     } catch (e) {
-      console.error("❌ Location error:", e.message);
+      console.error("❌ Location socket error:", e.message);
     }
   });
 
-  // ---------- TALK START ----------
-  socket.on("talk:start", () => {
-    talkImagesReady = false;
-    io.emit("talk:capture", { start: true });
-  });
-
-  // ---------- USER INPUT ----------
+  // ---------- TALK MODE ----------
   socket.on("talk:userinput", async ({ text }) => {
     try {
-      if (!text) return;
+      if (!talkImagesReady || !text) return;
 
-      const isGK = isGeneralKnowledge(text);
-      let payload;
+      const livePath = path.join(tempDir, "live.jpg");
+      const lastPath = path.join(tempDir, "last.jpg");
 
-      // ===== GENERAL KNOWLEDGE =====
-      if (isGK) {
-        payload = {
-          contents: [
-            {
-              parts: [
-                {
-                  text: `
-You are answering a general knowledge question.
-Rules:
-- Give a short, clear answer.
-- Do NOT mention images.
-- Do NOT say "Next step".
-`
-                },
-                { text: `Question: ${text}` }
-              ]
-            }
-          ]
-        };
-      }
+      if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) return;
 
-      // ===== IMAGE MODE =====
-      else {
-        if (!talkImagesReady) {
-          socket.emit("talk:reply", {
-            reply: "Camera image is not ready yet. Please wait."
-          });
-          return;
-        }
+      const liveBase64 = fs.readFileSync(livePath, "base64");
+      const lastBase64 = fs.readFileSync(lastPath, "base64");
 
-        const livePath = path.join(tempDir, "live.jpg");
-        const lastPath = path.join(tempDir, "last.jpg");
+      const systemPrompt = `
+You are a calm, practical assistant helping a blind person.
 
-        if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) {
-          socket.emit("talk:reply", {
-            reply: "Camera image is not available. Please try again."
-          });
-          return;
-        }
+Speak like a human guide.
+Do not ask questions.
+Do not give options.
 
-        const liveBase64 = fs.readFileSync(livePath, "base64");
-        const lastBase64 = fs.readFileSync(lastPath, "base64");
+Use 1 to 3 short sentences.
+Say only what is visible and important.
+If there is danger, warn clearly.
 
-        payload = {
-          contents: [
-            {
-              parts: [
-                {
-                  text: `
-You are guiding a blind person in real time.
-
-Rules:
-- Speak calmly.
-- Use simple words.
-- If danger is visible (vehicle, stairs, edge, obstacle),
-  warn immediately.
-
-Response format:
-1–3 short sentences.
-Then:
-
+End with:
 Next step:
 <one clear action>
-`
-                },
-                { text: `User said: "${text}"` },
-                { text: "Previous image:" },
-                { inline_data: { mime_type: "image/jpeg", data: lastBase64 } },
-                { text: "Current image:" },
-                { inline_data: { mime_type: "image/jpeg", data: liveBase64 } }
-              ]
-            }
-          ]
-        };
-      }
+`;
 
-      // ===== GEMINI CALL =====
+      const payload = {
+        contents: [
+          {
+            parts: [
+              { text: systemPrompt },
+              { text: "Previous view:" },
+              {
+                inline_data: {
+                  mime_type: "image/jpeg",
+                  data: lastBase64
+                }
+              },
+              { text: "Current view:" },
+              {
+                inline_data: {
+                  mime_type: "image/jpeg",
+                  data: liveBase64
+                }
+              },
+              { text: `User said: ${text}` }
+            ]
+          }
+        ]
+      };
+
       const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -235,24 +162,62 @@ Next step:
       });
 
       const data = await response.json();
+
       const reply =
         data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        "I am not able to answer right now.";
+        "I am not able to understand the scene clearly.";
 
-      socket.emit("talk:reply", { reply });
-
-      // 🧹 CLEAN UP
-      deleteTalkImages();
       talkImagesReady = false;
 
+      // 🔥 SEND RESPONSE BACK TO APP
+      socket.emit("talk:reply", { reply });
+
     } catch (e) {
-      console.error("❌ Talk error:", e.message);
+      console.error("❌ Talk socket error:", e.message);
     }
   });
 
   socket.on("disconnect", () => {
     console.log("❌ App disconnected:", socket.id);
   });
+});
+
+// =====================
+// HEALTH
+// =====================
+app.get("/health", (_, res) => {
+  res.json({ ok: true });
+});
+
+// =====================
+// EMERGENCY (PI)
+// =====================
+app.post("/emergency", async (_, res) => {
+  try {
+    emergencyActive = true;
+
+    await sendTelegramMessage(
+      "🚨 EMERGENCY ALERT\nButton pressed on Raspberry Pi\n⏰ " +
+      new Date().toLocaleString()
+    );
+
+    io.emit("emergency:triggered", { active: true });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false });
+  }
+});
+
+// =====================
+// EMERGENCY PHOTO
+// =====================
+app.post("/photo", upload.single("photo"), async (req, res) => {
+  try {
+    await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false });
+  }
 });
 
 // =====================
@@ -270,25 +235,13 @@ app.post(
     }
 
     talkImagesReady = true;
+
+    // 🔥 NOTIFY APP TO START MIC
     io.emit("talk:ready", { ready: true });
+
     res.json({ ok: true });
   }
 );
-
-// =====================
-// EMERGENCY PHOTO (OPTIONAL)
-// =====================
-app.post("/photo", upload.single("photo"), async (req, res) => {
-  await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
-  res.json({ ok: true });
-});
-
-// =====================
-// HEALTH
-// =====================
-app.get("/health", (_, res) => {
-  res.json({ ok: true });
-});
 
 // =====================
 // START SERVER
