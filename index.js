@@ -1,10 +1,10 @@
 /**
- * BlindAid Backend – FINAL SOLVED VERSION
- * -------------------------------------
+ * BlindAid Backend – FINAL ALL-IN-ONE FIXED VERSION
+ * ------------------------------------------------
+ * ✔ Emergency location → Telegram
  * ✔ GK vs Image logic correct
- * ✔ Images reused until AI call
- * ✔ Images deleted immediately after AI request
- * ✔ No "no image received" bug
+ * ✔ Images deleted after AI call
+ * ✔ No stale image / no missing location
  */
 
 import express from "express";
@@ -113,6 +113,29 @@ function deleteTalkImages() {
 io.on("connection", (socket) => {
   console.log("📡 App connected:", socket.id);
 
+  // ---------- EMERGENCY LOCATION (FIXED) ----------
+  socket.on("emergency:location", async ({ lat, lon }) => {
+    try {
+      if (!lat || !lon) {
+        console.log("❌ Location missing");
+        return;
+      }
+
+      const link = `https://maps.google.com/?q=${lat},${lon}`;
+      const msg =
+        "📍 EMERGENCY LOCATION\n" +
+        link +
+        "\n⏰ " +
+        new Date().toLocaleString();
+
+      await sendTelegramMessage(msg);
+      console.log("📤 Location sent to Telegram");
+
+    } catch (e) {
+      console.error("❌ Location error:", e.message);
+    }
+  });
+
   // ---------- TALK START ----------
   socket.on("talk:start", () => {
     talkImagesReady = false;
@@ -127,9 +150,7 @@ io.on("connection", (socket) => {
       const isGK = isGeneralKnowledge(text);
       let payload;
 
-      // =====================
-      // GENERAL KNOWLEDGE MODE
-      // =====================
+      // ===== GENERAL KNOWLEDGE =====
       if (isGK) {
         payload = {
           contents: [
@@ -140,7 +161,7 @@ io.on("connection", (socket) => {
 You are answering a general knowledge question.
 Rules:
 - Give a short, clear answer.
-- Do NOT talk about images.
+- Do NOT mention images.
 - Do NOT say "Next step".
 `
                 },
@@ -151,9 +172,7 @@ Rules:
         };
       }
 
-      // =====================
-      // IMAGE MODE
-      // =====================
+      // ===== IMAGE MODE =====
       else {
         if (!talkImagesReady) {
           socket.emit("talk:reply", {
@@ -186,7 +205,6 @@ You are guiding a blind person in real time.
 Rules:
 - Speak calmly.
 - Use simple words.
-- Describe surroundings ONLY if needed.
 - If danger is visible (vehicle, stairs, edge, obstacle),
   warn immediately.
 
@@ -209,9 +227,7 @@ Next step:
         };
       }
 
-      // =====================
-      // GEMINI CALL
-      // =====================
+      // ===== GEMINI CALL =====
       const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -225,7 +241,7 @@ Next step:
 
       socket.emit("talk:reply", { reply });
 
-      // 🧹 CLEANUP AFTER AI CALL
+      // 🧹 CLEAN UP
       deleteTalkImages();
       talkImagesReady = false;
 
@@ -258,6 +274,14 @@ app.post(
     res.json({ ok: true });
   }
 );
+
+// =====================
+// EMERGENCY PHOTO (OPTIONAL)
+// =====================
+app.post("/photo", upload.single("photo"), async (req, res) => {
+  await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
+  res.json({ ok: true });
+});
 
 // =====================
 // HEALTH
