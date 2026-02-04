@@ -1,8 +1,8 @@
 /**
- * BlindAid Backend – FINAL CLEAN VERSION
- * ------------------------------------
+ * BlindAid Backend – FINAL CLEAN VERSION (FIXED AI BEHAVIOR)
+ * ---------------------------------------------------------
  * - Emergency (Pi → REST)
- * - Talk Mode (Pi images → App voice → Gemini → App TTS)
+ * - Talk Mode (STRICT user-driven vision)
  * - Socket.IO based user interaction
  */
 
@@ -52,8 +52,8 @@ let talkImagesReady = false;
 // =====================
 // FOLDERS
 // =====================
-const uploadDir = "./uploads"; // emergency photo
-const tempDir = "./temp";      // talk images
+const uploadDir = "./uploads";
+const tempDir = "./temp";
 
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
@@ -86,19 +86,15 @@ io.on("connection", (socket) => {
   });
 
   socket.on("emergency:location", async ({ lat, lon }) => {
-    try {
-      if (!lat || !lon) return;
+    if (!lat || !lon) return;
 
-      const link = `https://maps.google.com/?q=${lat},${lon}`;
-      await sendTelegramMessage(
-        "📍 EMERGENCY LOCATION\n" +
-        link +
-        "\n⏰ " +
-        new Date().toLocaleString()
-      );
-    } catch (e) {
-      console.error("❌ Location socket error:", e.message);
-    }
+    const link = `https://maps.google.com/?q=${lat},${lon}`;
+    await sendTelegramMessage(
+      "📍 EMERGENCY LOCATION\n" +
+      link +
+      "\n⏰ " +
+      new Date().toLocaleString()
+    );
   });
 
   // ---------- TALK MODE ----------
@@ -114,18 +110,27 @@ io.on("connection", (socket) => {
       const liveBase64 = fs.readFileSync(livePath, "base64");
       const lastBase64 = fs.readFileSync(lastPath, "base64");
 
+      // 🔒 STRICT SYSTEM PROMPT
       const systemPrompt = `
-You are a calm, practical assistant helping a blind person.
+You are assisting a blind person.
 
-Speak like a human guide.
-Do not ask questions.
-Do not give options.
+IMPORTANT RULES (DO NOT BREAK):
 
-Use 1 to 3 short sentences.
-Say only what is visible and important.
-If there is danger, warn clearly.
+- You MUST respond ONLY to what the user explicitly asks.
+- DO NOT describe images unless the user asks about what is in front of them.
+- Images are ONLY for silent context.
+- If the user asks a general question, answer from common knowledge.
+- NEVER mention images unless asked.
+- NEVER give options.
+- NEVER ask questions.
+- Use 1–3 short sentences only.
 
-End with:
+If the user asks about their surroundings:
+Describe only what is clearly visible.
+Warn clearly if there is danger.
+
+End every response with:
+
 Next step:
 <one clear action>
 `;
@@ -135,20 +140,22 @@ Next step:
           {
             parts: [
               { text: systemPrompt },
-              { text: "Previous view:" },
+
+              // silent visual context
               {
                 inline_data: {
                   mime_type: "image/jpeg",
                   data: lastBase64
                 }
               },
-              { text: "Current view:" },
               {
                 inline_data: {
                   mime_type: "image/jpeg",
                   data: liveBase64
                 }
               },
+
+              // 🔥 USER PROMPT (THIS IS KING)
               { text: `User said: ${text}` }
             ]
           }
@@ -165,11 +172,10 @@ Next step:
 
       const reply =
         data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        "I am not able to understand the scene clearly.";
+        "I am not able to help with that.";
 
       talkImagesReady = false;
 
-      // 🔥 SEND RESPONSE BACK TO APP
       socket.emit("talk:reply", { reply });
 
     } catch (e) {
@@ -193,31 +199,23 @@ app.get("/health", (_, res) => {
 // EMERGENCY (PI)
 // =====================
 app.post("/emergency", async (_, res) => {
-  try {
-    emergencyActive = true;
+  emergencyActive = true;
 
-    await sendTelegramMessage(
-      "🚨 EMERGENCY ALERT\nButton pressed on Raspberry Pi\n⏰ " +
-      new Date().toLocaleString()
-    );
+  await sendTelegramMessage(
+    "🚨 EMERGENCY ALERT\nButton pressed on Raspberry Pi\n⏰ " +
+    new Date().toLocaleString()
+  );
 
-    io.emit("emergency:triggered", { active: true });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false });
-  }
+  io.emit("emergency:triggered", { active: true });
+  res.json({ ok: true });
 });
 
 // =====================
 // EMERGENCY PHOTO
 // =====================
 app.post("/photo", upload.single("photo"), async (req, res) => {
-  try {
-    await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
-    res.json({ ok: true });
-  } catch {
-    res.status(500).json({ ok: false });
-  }
+  await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
+  res.json({ ok: true });
 });
 
 // =====================
@@ -235,8 +233,6 @@ app.post(
     }
 
     talkImagesReady = true;
-
-    // 🔥 NOTIFY APP TO START MIC
     io.emit("talk:ready", { ready: true });
 
     res.json({ ok: true });
