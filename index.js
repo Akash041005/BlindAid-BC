@@ -1,9 +1,9 @@
 /**
- * BlindAid Backend – FINAL INTELLIGENT AI VERSION
- * ---------------------------------------------
+ * BlindAid Backend – FINAL CORRECT BEHAVIOUR VERSION
+ * -------------------------------------------------
  * - Emergency (Pi → REST)
- * - Talk Mode (Images + User Speech → Gemini → App TTS)
- * - Smart prompt: image only when needed, danger first
+ * - Talk Mode (Images + Speech → Gemini → App)
+ * - Backend decides: GK vs Image-based question
  */
 
 import express from "express";
@@ -71,60 +71,102 @@ const talkStorage = multer.diskStorage({
 const uploadTalkImages = multer({ storage: talkStorage });
 
 // =====================
+// HELPERS
+// =====================
+function isGeneralKnowledge(text) {
+  const gkKeywords = [
+    "who is",
+    "what is",
+    "president",
+    "prime minister",
+    "capital",
+    "country",
+    "usa",
+    "india",
+    "time",
+    "date",
+    "weather",
+    "how many",
+    "calculate",
+    "history",
+    "population"
+  ];
+
+  const t = text.toLowerCase();
+  return gkKeywords.some(k => t.includes(k));
+}
+
+// =====================
 // SOCKET.IO
 // =====================
 io.on("connection", (socket) => {
   console.log("📡 App connected:", socket.id);
-
-  // ---------- EMERGENCY ----------
-  socket.on("emergency:check", () => {
-    socket.emit("emergency:status", { active: emergencyActive });
-  });
-
-  socket.on("emergency:location", async ({ lat, lon }) => {
-    if (!lat || !lon) return;
-    await sendTelegramMessage(
-      `📍 EMERGENCY LOCATION\nhttps://maps.google.com/?q=${lat},${lon}`
-    );
-  });
 
   // ---------- TALK START ----------
   socket.on("talk:start", () => {
     io.emit("talk:capture", { start: true });
   });
 
-  // ---------- USER SPEECH ----------
+  // ---------- USER INPUT ----------
   socket.on("talk:userinput", async ({ text }) => {
     try {
-      if (!talkImagesReady || !text) return;
+      if (!text) return;
 
-      const livePath = path.join(tempDir, "live.jpg");
-      const lastPath = path.join(tempDir, "last.jpg");
-      if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) return;
+      const generalQuestion = isGeneralKnowledge(text);
 
-      const liveBase64 = fs.readFileSync(livePath, "base64");
-      const lastBase64 = fs.readFileSync(lastPath, "base64");
+      let payload;
 
-      // 🔥 MASTER SYSTEM PROMPT
-      const systemPrompt = `
-You are an AI assistant guiding a blind person in real time.
+      // =====================
+      // GENERAL KNOWLEDGE MODE
+      // =====================
+      if (generalQuestion) {
+        const generalPrompt = `
+You are answering a general knowledge question.
 
-IMPORTANT RULES:
-- Speak calmly like a human guide.
-- Use very simple language.
-- Do NOT ask questions.
-- Do NOT give multiple options.
+Rules:
+- Ignore any images.
+- Give a short, clear answer.
+- Do NOT mention surroundings.
+- Do NOT give navigation advice.
+- Do NOT say "Next step".
+`;
 
-IMAGE RULES:
-- Describe the images ONLY IF:
-  1) The user explicitly asks about surroundings, OR
-  2) You detect any danger in the images.
+        payload = {
+          contents: [
+            {
+              parts: [
+                { text: generalPrompt },
+                { text: `Question: ${text}` }
+              ]
+            }
+          ]
+        };
+      }
 
-DANGER RULE:
-- If you detect danger (vehicle, stairs, edge, obstacle, fire, pit),
+      // =====================
+      // IMAGE / NAVIGATION MODE
+      // =====================
+      else {
+        if (!talkImagesReady) return;
+
+        const livePath = path.join(tempDir, "live.jpg");
+        const lastPath = path.join(tempDir, "last.jpg");
+        if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) return;
+
+        const liveBase64 = fs.readFileSync(livePath, "base64");
+        const lastBase64 = fs.readFileSync(lastPath, "base64");
+
+        const navigationPrompt = `
+You are guiding a blind person in real time.
+
+Rules:
+- Speak calmly and clearly.
+- Use simple words.
+- Only describe images if relevant.
+- If danger is visible (vehicle, stairs, edge, obstacle, fire),
   warn immediately even if the user asked something else.
 
-RESPONSE FORMAT (MANDATORY):
+Response format:
 - 1 to 3 short sentences.
 - Then end with:
 
@@ -132,27 +174,21 @@ Next step:
 <one clear action>
 `;
 
-      const payload = {
-        contents: [
-          {
-            parts: [
-              { text: systemPrompt },
-              {
-                text: `
-User spoken command:
-"${text}"
-
-Decide whether to use the images based on the rules above.
-`
-              },
-              { text: "Previous image:" },
-              { inline_data: { mime_type: "image/jpeg", data: lastBase64 } },
-              { text: "Current image:" },
-              { inline_data: { mime_type: "image/jpeg", data: liveBase64 } }
-            ]
-          }
-        ]
-      };
+        payload = {
+          contents: [
+            {
+              parts: [
+                { text: navigationPrompt },
+                { text: `User said: "${text}"` },
+                { text: "Previous image:" },
+                { inline_data: { mime_type: "image/jpeg", data: lastBase64 } },
+                { text: "Current image:" },
+                { inline_data: { mime_type: "image/jpeg", data: liveBase64 } }
+              ]
+            }
+          ]
+        };
+      }
 
       const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
         method: "POST",
@@ -164,14 +200,14 @@ Decide whether to use the images based on the rules above.
 
       const reply =
         data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        "I am not able to understand clearly right now.";
+        "I am not able to answer right now.";
 
       talkImagesReady = false;
 
       socket.emit("talk:reply", { reply });
 
     } catch (e) {
-      console.error("❌ Talk AI error:", e.message);
+      console.error("❌ Talk error:", e.message);
     }
   });
 
