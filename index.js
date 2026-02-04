@@ -1,9 +1,9 @@
 /**
- * BlindAid Backend – TEMP DEBUG VERSION
- * ------------------------------------
- * GOAL:
- * - Confirm frontend → backend user text is received or not
- * - No AI logic for now
+ * BlindAid Backend – FINAL INTELLIGENT AI VERSION
+ * ---------------------------------------------
+ * - Emergency (Pi → REST)
+ * - Talk Mode (Images + User Speech → Gemini → App TTS)
+ * - Smart prompt: image only when needed, danger first
  */
 
 import express from "express";
@@ -14,6 +14,8 @@ import path from "path";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
+
+import { sendTelegramMessage, sendTelegramPhoto } from "./telegram.js";
 
 dotenv.config();
 
@@ -32,19 +34,32 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 
 // =====================
+// CONFIG
+// =====================
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_URL =
+  "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent";
+
+// =====================
 // STATE
 // =====================
+let emergencyActive = false;
 let talkImagesReady = false;
 
 // =====================
 // FOLDERS
 // =====================
+const uploadDir = "./uploads";
 const tempDir = "./temp";
+
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
 // =====================
-// MULTER (TALK IMAGES)
+// MULTER
 // =====================
+const upload = multer({ dest: uploadDir });
+
 const talkStorage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, tempDir),
   filename: (_, file, cb) => {
@@ -61,42 +76,133 @@ const uploadTalkImages = multer({ storage: talkStorage });
 io.on("connection", (socket) => {
   console.log("📡 App connected:", socket.id);
 
-  // -------- TALK START (optional) --------
-  socket.on("talk:start", () => {
-    console.log("🎬 talk:start received from frontend");
-    socket.emit("talk:ack", {
-      ok: true,
-      msg: "talk:start received by backend"
-    });
+  // ---------- EMERGENCY ----------
+  socket.on("emergency:check", () => {
+    socket.emit("emergency:status", { active: emergencyActive });
   });
 
-  // -------- USER INPUT (MAIN DEBUG POINT) --------
-  socket.on("talk:userinput", (data) => {
-    console.log("🧪 RAW talk:userinput payload:", data);
+  socket.on("emergency:location", async ({ lat, lon }) => {
+    if (!lat || !lon) return;
+    await sendTelegramMessage(
+      `📍 EMERGENCY LOCATION\nhttps://maps.google.com/?q=${lat},${lon}`
+    );
+  });
 
-    if (!data || typeof data.text !== "string" || data.text.trim() === "") {
-      console.log("❌ USER TEXT NOT RECEIVED");
+  // ---------- TALK START ----------
+  socket.on("talk:start", () => {
+    io.emit("talk:capture", { start: true });
+  });
 
-      socket.emit("talk:text-status", {
-        received: false,
-        reason: "No text / empty text received at backend"
+  // ---------- USER SPEECH ----------
+  socket.on("talk:userinput", async ({ text }) => {
+    try {
+      if (!talkImagesReady || !text) return;
+
+      const livePath = path.join(tempDir, "live.jpg");
+      const lastPath = path.join(tempDir, "last.jpg");
+      if (!fs.existsSync(livePath) || !fs.existsSync(lastPath)) return;
+
+      const liveBase64 = fs.readFileSync(livePath, "base64");
+      const lastBase64 = fs.readFileSync(lastPath, "base64");
+
+      // 🔥 MASTER SYSTEM PROMPT
+      const systemPrompt = `
+You are an AI assistant guiding a blind person in real time.
+
+IMPORTANT RULES:
+- Speak calmly like a human guide.
+- Use very simple language.
+- Do NOT ask questions.
+- Do NOT give multiple options.
+
+IMAGE RULES:
+- Describe the images ONLY IF:
+  1) The user explicitly asks about surroundings, OR
+  2) You detect any danger in the images.
+
+DANGER RULE:
+- If you detect danger (vehicle, stairs, edge, obstacle, fire, pit),
+  warn immediately even if the user asked something else.
+
+RESPONSE FORMAT (MANDATORY):
+- 1 to 3 short sentences.
+- Then end with:
+
+Next step:
+<one clear action>
+`;
+
+      const payload = {
+        contents: [
+          {
+            parts: [
+              { text: systemPrompt },
+              {
+                text: `
+User spoken command:
+"${text}"
+
+Decide whether to use the images based on the rules above.
+`
+              },
+              { text: "Previous image:" },
+              { inline_data: { mime_type: "image/jpeg", data: lastBase64 } },
+              { text: "Current image:" },
+              { inline_data: { mime_type: "image/jpeg", data: liveBase64 } }
+            ]
+          }
+        ]
+      };
+
+      const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
       });
-      return;
+
+      const data = await response.json();
+
+      const reply =
+        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        "I am not able to understand clearly right now.";
+
+      talkImagesReady = false;
+
+      socket.emit("talk:reply", { reply });
+
+    } catch (e) {
+      console.error("❌ Talk AI error:", e.message);
     }
-
-    console.log("✅ USER TEXT RECEIVED:");
-    console.log("🗣️ >", data.text);
-
-    socket.emit("talk:text-status", {
-      received: true,
-      text: data.text,
-      time: new Date().toISOString()
-    });
   });
 
   socket.on("disconnect", () => {
     console.log("❌ App disconnected:", socket.id);
   });
+});
+
+// =====================
+// HEALTH
+// =====================
+app.get("/health", (_, res) => {
+  res.json({ ok: true });
+});
+
+// =====================
+// EMERGENCY (PI)
+// =====================
+app.post("/emergency", async (_, res) => {
+  emergencyActive = true;
+  await sendTelegramMessage("🚨 EMERGENCY ALERT FROM RASPBERRY PI");
+  io.emit("emergency:triggered", { active: true });
+  res.json({ ok: true });
+});
+
+// =====================
+// EMERGENCY PHOTO
+// =====================
+app.post("/photo", upload.single("photo"), async (req, res) => {
+  await sendTelegramPhoto(req.file.path, "📸 Emergency Photo");
+  res.json({ ok: true });
 });
 
 // =====================
@@ -114,24 +220,14 @@ app.post(
     }
 
     talkImagesReady = true;
-    console.log("🧠 Talk images received");
-
     io.emit("talk:ready", { ready: true });
-
     res.json({ ok: true });
   }
 );
 
 // =====================
-// HEALTH
-// =====================
-app.get("/health", (_, res) => {
-  res.json({ ok: true });
-});
-
-// =====================
 // START SERVER
 // =====================
 server.listen(PORT, () => {
-  console.log(`🚀 BlindAid TEMP DEBUG backend running on port ${PORT}`);
+  console.log(`🚀 BlindAid backend running on port ${PORT}`);
 });
